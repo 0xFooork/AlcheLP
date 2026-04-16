@@ -64,3 +64,11 @@ $ forge --help
 $ anvil --help
 $ cast --help
 ```
+
+
+forge remove OpenZeppelin/openzeppelin-contracts
+
+forge install OpenZeppelin/openzeppelin-contracts@v3.4.2-solc-0.7
+forge install OpenZeppelin/openzeppelin-contracts@v4.9.6
+forge install Uniswap/v3-core
+forge install Uniswap/v3-periphery
