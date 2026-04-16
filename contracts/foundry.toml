@@ -16,9 +16,10 @@ optimizer_runs = 500
 gas_limit = 1073741824
 
 remappings = [
-    '@uniswap/v3-periphery=lib/v3-periphery',
-    "@uniswap/v3-core=lib/v3-core",
-    '@openzeppelin=lib/openzeppelin-contracts',
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@uniswap/v3-periphery/=lib/v3-periphery/",
+    "@uniswap/v3-core/=lib/v3-core/",
+    "forge-std=lib/forge-std/src",
 ]
 
 
