@@ -11,7 +11,7 @@ contract UniswapLPTest is Test {
     address constant UNISWAP_V3_ROUTER =
         0xE592427A0AEce92De3Edee1F18E0157C05861564;
     address constant UNISWAP_V3_POSITION_MANAGER =
-        0xC36442b4a4522E871399CD717aBD90098588639f;
+        0xC36442b4A4522E871399CD717ABd90098588639F;
     address constant UNISWAP_V3_FACTORY =
         0x1F98431c8aD98523631AE4a59f267346ea31F984;
 
@@ -23,7 +23,8 @@ contract UniswapLPTest is Test {
             UNISWAP_V3_ROUTER,
             UNISWAP_V3_POSITION_MANAGER,
             UNISWAP_V3_FACTORY,
-            feeRecipient
+            feeRecipient,
+            msg.sender
         );
     }
 

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {Script} from "forge-std/Script.sol";
+import "forge-std/console.sol";
 import {UniswapLP} from "../src/UniswapLP.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
@@ -45,7 +46,8 @@ contract UniswapLPScript is Script {
             config.uniswapV3Router,
             config.uniswapV3PositionManager,
             config.uniswapV3Factory,
-            feeRecipient
+            feeRecipient,
+            msg.sender
         );
 
         vm.stopBroadcast();

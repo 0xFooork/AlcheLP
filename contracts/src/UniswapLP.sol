@@ -1,26 +1,20 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.28;
 
-import {
-    ISwapRouter
-} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
+import {ISwapRouter} from "./interface/ISwapRouter.sol";
 import {
     INonfungiblePositionManager
-} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
-import {
-    IUniswapV3Factory
-} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
-import {
-    IUniswapV3Pool
-} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+} from "./interface/INonfungiblePositionManager.sol";
+import {IUniswapV3Factory} from "./interface/IUniswapV3Factory.sol";
+import {IUniswapV3Pool} from "./interface/IUniswapV3Pool.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
-import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {
-    FixedPoint96
-} from "@uniswap/v3-core/contracts/libraries/FixedPoint96.sol";
+    SafeERC20
+} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {TickMath} from "./libraries/TickMath.sol";
+import {FullMath} from "./libraries/FullMath.sol";
+import {FixedPoint96} from "./libraries/FixedPoint96.sol";
 
 contract UniswapLP is Ownable {
     using SafeERC20 for IERC20;
@@ -63,8 +57,9 @@ contract UniswapLP is Ownable {
         address _swapRouter,
         address _positionManager,
         address _factory,
-        address _feeRecipient
-    ) {
+        address _feeRecipient,
+        address _initialOwner
+    ) Ownable(_initialOwner) {
         swapRouter = ISwapRouter(_swapRouter);
         positionManager = INonfungiblePositionManager(_positionManager);
         factory = IUniswapV3Factory(_factory);
@@ -269,7 +264,10 @@ contract UniswapLP is Ownable {
 
             if (token0ForSwap > 0) {
                 // 需要 swap
-                IERC20(tokenIn).safeApprove(address(swapRouter), token0ForSwap);
+                IERC20(tokenIn).safeIncreaseAllowance(
+                    address(swapRouter),
+                    token0ForSwap
+                );
 
                 // 计算最小输出（考虑滑点）
                 // 这里简化处理：按照比例计算理论输出，然后应用滑点容限
@@ -306,7 +304,10 @@ contract UniswapLP is Ownable {
 
             if (token1ForSwap > 0) {
                 // 需要 swap
-                IERC20(tokenIn).safeApprove(address(swapRouter), token1ForSwap);
+                IERC20(tokenIn).safeIncreaseAllowance(
+                    address(swapRouter),
+                    token1ForSwap
+                );
 
                 // 计算最小输出
                 uint256 token0Amount = (amountInAfterFee * ratioToken0) / 100;
@@ -338,11 +339,11 @@ contract UniswapLP is Ownable {
         }
 
         // 批准 position manager
-        IERC20(poolInfo.token0).safeApprove(
+        IERC20(poolInfo.token0).safeIncreaseAllowance(
             address(positionManager),
             amount0Desired
         );
-        IERC20(poolInfo.token1).safeApprove(
+        IERC20(poolInfo.token1).safeIncreaseAllowance(
             address(positionManager),
             amount1Desired
         );
