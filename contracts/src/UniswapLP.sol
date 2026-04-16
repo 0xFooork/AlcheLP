@@ -7,6 +7,7 @@ import {
 } from "./interface/INonfungiblePositionManager.sol";
 import {IUniswapV3Factory} from "./interface/IUniswapV3Factory.sol";
 import {IUniswapV3Pool} from "./interface/IUniswapV3Pool.sol";
+import {IWETH} from "./interface/IWETH.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
     SafeERC20
@@ -22,6 +23,7 @@ contract UniswapLP is Ownable {
     ISwapRouter public swapRouter;
     INonfungiblePositionManager public positionManager;
     IUniswapV3Factory public factory;
+    IWETH public weth;
 
     uint256 public protocolFee;
     address public feeRecipient;
@@ -57,12 +59,14 @@ contract UniswapLP is Ownable {
         address _swapRouter,
         address _positionManager,
         address _factory,
+        address _weth,
         address _feeRecipient,
         address _initialOwner
     ) Ownable(_initialOwner) {
         swapRouter = ISwapRouter(_swapRouter);
         positionManager = INonfungiblePositionManager(_positionManager);
         factory = IUniswapV3Factory(_factory);
+        weth = IWETH(_weth);
         feeRecipient = _feeRecipient;
         protocolFee = 10;
     }
@@ -211,6 +215,7 @@ contract UniswapLP is Ownable {
         uint256 deadline
     )
         external
+        payable
         returns (
             uint256 tokenId,
             uint128 liquidity,
@@ -221,6 +226,12 @@ contract UniswapLP is Ownable {
         require(amountIn > 0, "Invalid amount");
         require(slippageTolerance <= 10000, "Slippage too high");
         require(deadline >= block.timestamp, "Deadline exceeded");
+
+        // 处理 ETH 转 WETH
+        if (tokenIn == address(weth) && msg.value > 0) {
+            require(msg.value == amountIn, "ETH amount mismatch");
+            weth.deposit{value: msg.value}();
+        }
 
         // 获取 pool 信息
         PoolInfo memory poolInfo = getPoolInfo(tokenIn, tokenOut, poolFee);
@@ -239,19 +250,30 @@ contract UniswapLP is Ownable {
         uint256 amountInAfterFee = amountIn - protocolFeeAmount;
 
         if (protocolFeeAmount > 0) {
-            IERC20(tokenIn).safeTransferFrom(
-                msg.sender,
-                feeRecipient,
-                protocolFeeAmount
-            );
+            if (tokenIn == address(weth) && msg.value > 0) {
+                // 已从合约的 WETH 余额中支付手续费
+                IERC20(address(weth)).safeTransfer(
+                    feeRecipient,
+                    protocolFeeAmount
+                );
+            } else {
+                // 从用户账户转移代币作为手续费
+                IERC20(tokenIn).safeTransferFrom(
+                    msg.sender,
+                    feeRecipient,
+                    protocolFeeAmount
+                );
+            }
         }
 
-        // 转入用户的代币
-        IERC20(tokenIn).safeTransferFrom(
-            msg.sender,
-            address(this),
-            amountInAfterFee
-        );
+        // 转入用户的代币（如果不是通过 ETH 已转入）
+        if (!(tokenIn == address(weth) && msg.value > 0)) {
+            IERC20(tokenIn).safeTransferFrom(
+                msg.sender,
+                address(this),
+                amountInAfterFee
+            );
+        }
 
         uint256 amount0Desired;
         uint256 amount1Desired;

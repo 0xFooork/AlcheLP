@@ -14,6 +14,7 @@ contract UniswapLPTest is Test {
         0xC36442b4A4522E871399CD717ABd90098588639F;
     address constant UNISWAP_V3_FACTORY =
         0x1F98431c8aD98523631AE4a59f267346ea31F984;
+    address constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
 
     address user = makeAddr("user");
     address feeRecipient = makeAddr("feeRecipient");
@@ -23,6 +24,7 @@ contract UniswapLPTest is Test {
             UNISWAP_V3_ROUTER,
             UNISWAP_V3_POSITION_MANAGER,
             UNISWAP_V3_FACTORY,
+            WETH,
             feeRecipient,
             msg.sender
         );

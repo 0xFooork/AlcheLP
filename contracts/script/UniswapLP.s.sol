@@ -46,6 +46,7 @@ contract UniswapLPScript is Script {
             config.uniswapV3Router,
             config.uniswapV3PositionManager,
             config.uniswapV3Factory,
+            config.weth,
             feeRecipient,
             msg.sender
         );
