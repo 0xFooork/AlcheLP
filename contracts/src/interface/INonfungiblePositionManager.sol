@@ -16,6 +16,8 @@ interface INonfungiblePositionManager {
         uint256 deadline;
     }
 
+    function ownerOf(uint256 tokenId) external view returns (address owner);
+
     function mint(
         MintParams calldata params
     )

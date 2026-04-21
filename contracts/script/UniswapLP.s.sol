@@ -20,6 +20,7 @@ contract UniswapLPScript is Script {
         address uniswapV3Factory;
         address uniswapV3PositionManager;
         address weth;
+        address quoterV2;
     }
 
     function run() public {
@@ -47,6 +48,7 @@ contract UniswapLPScript is Script {
             config.uniswapV3PositionManager,
             config.uniswapV3Factory,
             config.weth,
+            config.quoterV2,
             feeRecipient,
             msg.sender
         );
@@ -83,6 +85,7 @@ contract UniswapLPScript is Script {
             ".uniswapV3PositionManager"
         );
         config.weth = json.readAddress(".weth");
+        config.quoterV2 = json.readAddress(".quoterV2");
 
         return config;
     }

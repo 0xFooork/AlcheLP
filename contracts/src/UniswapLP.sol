@@ -8,6 +8,7 @@ import {
 import {IUniswapV3Factory} from "./interface/IUniswapV3Factory.sol";
 import {IUniswapV3Pool} from "./interface/IUniswapV3Pool.sol";
 import {IWETH} from "./interface/IWETH.sol";
+import {IQuoterV2} from "./interface/IQuoterV2.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
     SafeERC20
@@ -24,6 +25,7 @@ contract UniswapLP is Ownable {
     INonfungiblePositionManager public positionManager;
     IUniswapV3Factory public factory;
     IWETH public weth;
+    IQuoterV2 public quoterV2;
 
     uint256 public protocolFee;
     address public feeRecipient;
@@ -66,6 +68,7 @@ contract UniswapLP is Ownable {
         address _positionManager,
         address _factory,
         address _weth,
+        address _quoterV2,
         address _feeRecipient,
         address _initialOwner
     ) Ownable(_initialOwner) {
@@ -73,6 +76,7 @@ contract UniswapLP is Ownable {
         positionManager = INonfungiblePositionManager(_positionManager);
         factory = IUniswapV3Factory(_factory);
         weth = IWETH(_weth);
+        quoterV2 = IQuoterV2(_quoterV2);
         feeRecipient = _feeRecipient;
         protocolFee = 10;
     }
@@ -94,7 +98,7 @@ contract UniswapLP is Ownable {
 
     // 手续费管理
     function setProtocolFee(uint256 _fee) external onlyOwner {
-        require(_fee <= 10000, "Fee too high"); // 最高100%
+        require(_fee <= 500, "Fee too high"); // 最高5%
         protocolFee = _fee;
         emit ProtocolFeeUpdated(_fee);
     }
@@ -151,60 +155,32 @@ contract UniswapLP is Ownable {
     ) public view returns (uint256 ratioToken0, uint256 ratioToken1) {
         PoolInfo memory poolInfo = getPoolInfo(tokenA, tokenB, fee);
 
-        if (poolInfo.currentTick < tickLower) {
-            // 价格低于范围，应该投入 token0（较便宜的）
-            ratioToken0 = 100;
-            ratioToken1 = 0;
-        } else if (poolInfo.currentTick > tickUpper) {
-            // 价格高于范围，应该投入 token1（较便宜的）
-            ratioToken0 = 0;
-            ratioToken1 = 100;
-        } else {
-            // 当前价格在区间内，用 sqrtPrice 计算真实比例
-            uint160 sqrtPriceCurrent = poolInfo.sqrtPriceX96;
-            uint160 sqrtPriceLower = TickMath.getSqrtRatioAtTick(tickLower);
-            uint160 sqrtPriceUpper = TickMath.getSqrtRatioAtTick(tickUpper);
+        int24 currentTick = poolInfo.currentTick;
 
-            // 用 Q96 精度计算，避免溢出
-            // amount0 ∝ (sqrtUpper - sqrtCurrent) / (sqrtCurrent * sqrtUpper)
-            // amount1 ∝ (sqrtCurrent - sqrtLower)
-            //
-            // 将两者统一到同一量纲再做比较：
-            // value0 ≈ amount0 * sqrtCurrent^2   (折算成 token1 计价)
-            // value1 ≈ amount1
-
-            // 先用 uint256 防止溢出
-            uint256 sqrtCurrent = uint256(sqrtPriceCurrent);
-            uint256 sqrtLower = uint256(sqrtPriceLower);
-            uint256 sqrtUpper = uint256(sqrtPriceUpper);
-
-            // amount0 份额（单位：Q96 / sqrtPrice 量纲，待折算）
-            uint256 amount0Part = FullMath.mulDiv(
-                sqrtUpper - sqrtCurrent,
-                FixedPoint96.Q96,
-                FullMath.mulDiv(sqrtCurrent, sqrtUpper, FixedPoint96.Q96)
-            );
-
-            // amount1 份额（直接是 sqrtPrice 量纲）
-            uint256 amount1Part = sqrtCurrent - sqrtLower;
-
-            // 折算 amount0 到 token1 计价：乘以 (sqrtCurrent/Q96)^2
-            // value0 = amount0Part * sqrtCurrent^2 / Q96^2
-            uint256 value0 = FullMath.mulDiv(
-                amount0Part,
-                FullMath.mulDiv(sqrtCurrent, sqrtCurrent, FixedPoint96.Q96),
-                FixedPoint96.Q96
-            );
-
-            // value1 = amount1Part（量纲本身就是 token1）
-            uint256 value1 = amount1Part;
-
-            uint256 total = value0 + value1;
-            require(total > 0, "zero range");
-
-            ratioToken0 = (value0 * 100) / total;
-            ratioToken1 = 100 - ratioToken0;
+        if (currentTick <= tickLower) {
+            // 价格低于区间：全部 token0
+            return (10000, 0);
         }
+
+        if (currentTick >= tickUpper) {
+            // 价格高于区间：全部 token1
+            return (0, 10000);
+        }
+
+        uint256 sc = uint256(poolInfo.sqrtPriceX96);
+        uint256 sa = uint256(TickMath.getSqrtRatioAtTick(tickLower));
+        uint256 sb = uint256(TickMath.getSqrtRatioAtTick(tickUpper));
+
+        // w0 = sc*(sb-sc)/sb  对应 token0 的价值权重（以 token1 计价）
+        // w1 = sc-sa           对应 token1 的价值权重
+        uint256 w0 = FullMath.mulDiv(sc, sb - sc, sb);
+        uint256 w1 = sc - sa;
+
+        uint256 total = w0 + w1;
+        require(total > 0, "invalid range");
+
+        ratioToken0 = (w0 * 10000) / total;
+        ratioToken1 = 10000 - ratioToken0;
     }
 
     // 核心功能：单边资产自动配比 swap 然后 mint LP
@@ -281,11 +257,13 @@ contract UniswapLP is Ownable {
 
         uint256 amount0Desired;
         uint256 amount1Desired;
+        uint256 amount0Min = 0;
+        uint256 amount1Min = 0;
 
         // 计算需要的 token0 和 token1 的投入量（按比例分配）
         if (tokenIn == poolInfo.token0) {
             // 用户投入 token0，需要 swap 一部分换成 token1
-            uint256 token0Amount = (amountInAfterFee * ratioToken0) / 100;
+            uint256 token0Amount = (amountInAfterFee * ratioToken0) / 10000;
             uint256 token0ForSwap = amountInAfterFee - token0Amount;
 
             if (token0ForSwap > 0) {
@@ -296,15 +274,23 @@ contract UniswapLP is Ownable {
                 );
 
                 // 计算最小输出和价格保护
-                uint256 token1Amount = (amountInAfterFee * ratioToken1) / 100;
+                (uint256 token1Amount, uint160 sqrtPriceX96, , ) = quoterV2
+                    .quoteExactInputSingle(
+                        IQuoterV2.QuoteExactInputSingleParams({
+                            tokenIn: tokenIn,
+                            tokenOut: tokenOut,
+                            amountIn: token0ForSwap,
+                            fee: poolFee,
+                            sqrtPriceLimitX96: 0
+                        })
+                    );
                 uint256 amountOutMinimum = token1Amount -
                     (token1Amount * slippageTolerance) /
                     10000;
 
                 // 计算价格保护：允许的最低价格
                 uint160 sqrtPriceLimitX96 = uint160(
-                    (uint256(poolInfo.sqrtPriceX96) *
-                        (10000 - slippageTolerance)) / 10000
+                    (sqrtPriceX96 * (10000 - slippageTolerance)) / 10000
                 );
 
                 uint256 amountOut = swapRouter.exactInputSingle(
@@ -330,7 +316,7 @@ contract UniswapLP is Ownable {
             }
         } else {
             // 用户投入 token1，需要 swap 一部分换成 token0
-            uint256 token1Amount = (amountInAfterFee * ratioToken1) / 100;
+            uint256 token1Amount = (amountInAfterFee * ratioToken1) / 10000;
             uint256 token1ForSwap = amountInAfterFee - token1Amount;
 
             if (token1ForSwap > 0) {
@@ -341,15 +327,24 @@ contract UniswapLP is Ownable {
                 );
 
                 // 计算最小输出和价格保护
-                uint256 token0Amount = (amountInAfterFee * ratioToken0) / 100;
+                (uint256 token0Amount, uint160 sqrtPriceX96, , ) = quoterV2
+                    .quoteExactInputSingle(
+                        IQuoterV2.QuoteExactInputSingleParams({
+                            tokenIn: tokenIn,
+                            tokenOut: tokenOut,
+                            amountIn: token1ForSwap,
+                            fee: poolFee,
+                            sqrtPriceLimitX96: 0
+                        })
+                    );
                 uint256 amountOutMinimum = token0Amount -
                     (token0Amount * slippageTolerance) /
                     10000;
 
                 // 计算价格保护：允许的最高价格（token1兑token0）
                 uint160 sqrtPriceLimitX96 = uint160(
-                    (uint256(poolInfo.sqrtPriceX96) *
-                        (10000 + slippageTolerance)) / 10000
+                    (uint256(sqrtPriceX96) * (10000 + slippageTolerance)) /
+                        10000
                 );
 
                 uint256 amountOut = swapRouter.exactInputSingle(
@@ -376,18 +371,18 @@ contract UniswapLP is Ownable {
         }
 
         // 计算 amount0Min 和 amount1Min
-        uint256 amount0Min = amount0Desired -
-            (amount0Desired * slippageTolerance) /
-            10000;
-        uint256 amount1Min = amount1Desired -
-            (amount1Desired * slippageTolerance) /
-            10000;
-        require(
-            (amount0Min == 0 && amount1Min > 0) ||
-                (amount0Min > 0 && amount1Min == 0) ||
-                (amount0Min > 0 && amount1Min > 0),
-            "amount min value error"
-        );
+        // 计算 amount0Min 和 amount1Min
+        if (amount0Desired == 0) {
+            amount1Min =
+                amount1Desired -
+                (amount1Desired * slippageTolerance) /
+                10000;
+        } else if (amount1Desired == 0) {
+            amount0Min =
+                amount0Desired -
+                (amount0Desired * slippageTolerance) /
+                10000;
+        }
 
         // 批准 position manager
         IERC20(poolInfo.token0).safeIncreaseAllowance(
@@ -409,8 +404,8 @@ contract UniswapLP is Ownable {
                 tickUpper: tickUpper,
                 amount0Desired: amount0Desired,
                 amount1Desired: amount1Desired,
-                amount0Min: (amount0Min > 0 ? amount0Min : 0),
-                amount1Min: (amount1Min > 0 ? amount1Min : 0),
+                amount0Min: amount0Min,
+                amount1Min: amount1Min,
                 recipient: msg.sender,
                 deadline: deadline
             })
@@ -456,6 +451,10 @@ contract UniswapLP is Ownable {
         require(amountIn > 0, "Invalid amount");
         require(slippageTolerance <= 10000, "Slippage too high");
         require(deadline >= block.timestamp, "Deadline exceeded");
+        require(
+            positionManager.ownerOf(tokenId) == msg.sender,
+            "Not NFT owner"
+        );
 
         // 获取 NFT 位置信息
         (
@@ -485,8 +484,7 @@ contract UniswapLP is Ownable {
             weth.deposit{value: msg.value}();
         }
 
-        // 获取 pool 信息和投入比例
-        PoolInfo memory poolInfo = getPoolInfo(token0, token1, fee);
+        // 获取投入比例
         (uint256 ratioToken0, uint256 ratioToken1) = getUniDirectionalRatio(
             token0,
             token1,
@@ -525,6 +523,8 @@ contract UniswapLP is Ownable {
 
         uint256 amount0Desired;
         uint256 amount1Desired;
+        uint256 amount0Min = 0;
+        uint256 amount1Min = 0;
 
         // 确定投入的 token 方向（是 token0 还是 token1）
         bool isToken0Input = (tokenIn == token0);
@@ -532,7 +532,7 @@ contract UniswapLP is Ownable {
         // 计算需要的投入量
         if (isToken0Input) {
             // 用户投入 token0，需要 swap 一部分换成 token1
-            uint256 token0Amount = (amountInAfterFee * ratioToken0) / 100;
+            uint256 token0Amount = (amountInAfterFee * ratioToken0) / 10000;
             uint256 token0ForSwap = amountInAfterFee - token0Amount;
 
             if (token0ForSwap > 0) {
@@ -542,15 +542,23 @@ contract UniswapLP is Ownable {
                     token0ForSwap
                 );
 
-                uint256 token1Amount = (amountInAfterFee * ratioToken1) / 100;
+                (uint256 token1Amount, uint160 sqrtPriceX96, , ) = quoterV2
+                    .quoteExactInputSingle(
+                        IQuoterV2.QuoteExactInputSingleParams({
+                            tokenIn: token0,
+                            tokenOut: token1,
+                            amountIn: token0ForSwap,
+                            fee: fee,
+                            sqrtPriceLimitX96: 0
+                        })
+                    );
                 uint256 amountOutMinimum = token1Amount -
                     (token1Amount * slippageTolerance) /
                     10000;
 
-                // 计算价格保护
+                // 计算价格保护：允许的最低价格
                 uint160 sqrtPriceLimitX96 = uint160(
-                    (uint256(poolInfo.sqrtPriceX96) *
-                        (10000 - slippageTolerance)) / 10000
+                    (sqrtPriceX96 * (10000 - slippageTolerance)) / 10000
                 );
 
                 uint256 amountOut = swapRouter.exactInputSingle(
@@ -576,7 +584,7 @@ contract UniswapLP is Ownable {
             }
         } else {
             // 用户投入 token1，需要 swap 一部分换成 token0
-            uint256 token1Amount = (amountInAfterFee * ratioToken1) / 100;
+            uint256 token1Amount = (amountInAfterFee * ratioToken1) / 10000;
             uint256 token1ForSwap = amountInAfterFee - token1Amount;
 
             if (token1ForSwap > 0) {
@@ -586,15 +594,24 @@ contract UniswapLP is Ownable {
                     token1ForSwap
                 );
 
-                uint256 token0Amount = (amountInAfterFee * ratioToken0) / 100;
+                (uint256 token0Amount, uint160 sqrtPriceX96, , ) = quoterV2
+                    .quoteExactInputSingle(
+                        IQuoterV2.QuoteExactInputSingleParams({
+                            tokenIn: token1,
+                            tokenOut: token0,
+                            amountIn: token1ForSwap,
+                            fee: fee,
+                            sqrtPriceLimitX96: 0
+                        })
+                    );
                 uint256 amountOutMinimum = token0Amount -
                     (token0Amount * slippageTolerance) /
                     10000;
 
-                // 计算价格保护
+                // 计算价格保护：允许的最高价格（token1兑token0）
                 uint160 sqrtPriceLimitX96 = uint160(
-                    (uint256(poolInfo.sqrtPriceX96) *
-                        (10000 + slippageTolerance)) / 10000
+                    (uint256(sqrtPriceX96) * (10000 + slippageTolerance)) /
+                        10000
                 );
 
                 uint256 amountOut = swapRouter.exactInputSingle(
@@ -621,18 +638,17 @@ contract UniswapLP is Ownable {
         }
 
         // 计算 amount0Min 和 amount1Min
-        uint256 amount0Min = amount0Desired -
-            (amount0Desired * slippageTolerance) /
-            10000;
-        uint256 amount1Min = amount1Desired -
-            (amount1Desired * slippageTolerance) /
-            10000;
-        require(
-            (amount0Min == 0 && amount1Min > 0) ||
-                (amount0Min > 0 && amount1Min == 0) ||
-                (amount0Min > 0 && amount1Min > 0),
-            "amount min value error"
-        );
+        if (amount0Desired == 0) {
+            amount1Min =
+                amount1Desired -
+                (amount1Desired * slippageTolerance) /
+                10000;
+        } else if (amount1Desired == 0) {
+            amount0Min =
+                amount0Desired -
+                (amount0Desired * slippageTolerance) /
+                10000;
+        }
 
         // 批准 position manager
         IERC20(token0).safeIncreaseAllowance(
@@ -650,8 +666,8 @@ contract UniswapLP is Ownable {
                 tokenId: tokenId,
                 amount0Desired: amount0Desired,
                 amount1Desired: amount1Desired,
-                amount0Min: (amount0Min > 0 ? amount0Min : 0),
-                amount1Min: (amount1Min > 0 ? amount1Min : 0),
+                amount0Min: amount0Min,
+                amount1Min: amount1Min,
                 deadline: deadline
             })
         );

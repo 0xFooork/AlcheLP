@@ -17,6 +17,7 @@ contract UniswapLPTest is Test {
     address constant UNISWAP_V3_FACTORY =
         0x1F98431c8aD98523631AE4a59f267346ea31F984;
     address constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+    address constant QUOTER_V2 = 0x61fFE014bA17989E743c5F6cB21bF9697530B21e;
 
     address user = makeAddr("user");
     address feeRecipient = makeAddr("feeRecipient");
@@ -40,6 +41,7 @@ contract UniswapLPTest is Test {
             UNISWAP_V3_POSITION_MANAGER,
             UNISWAP_V3_FACTORY,
             WETH,
+            QUOTER_V2,
             feeRecipient,
             owner
         );
@@ -438,7 +440,7 @@ contract UniswapLPTest is Test {
         int24 tickUpper = 297000;
         uint256 amountMint = 1000e6; // 1000 USDC for mint
         uint256 amountIncrease = 500e6; // 500 USDC for increase
-        uint256 slippageTolerance = 500; // 5%
+        uint256 slippageTolerance = 10; // 5%
         uint256 deadline = block.timestamp + 3600;
 
         // First: Create initial LP position
@@ -525,11 +527,11 @@ contract UniswapLPTest is Test {
         console.log("testSwapAndIncreaseLiquidity_WithWETH: Start testing");
         address USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
         uint24 poolFee = 500; // 0.05%
-        int24 tickLower = 193000;
-        int24 tickUpper = 197000;
+        int24 tickLower = 191140;
+        int24 tickUpper = 199360;
         uint256 amountMint = 1000e6; // 1000 USDC for mint
-        uint256 amountIncrease = 0.25 ether; // 0.25 WETH for increase
-        uint256 slippageTolerance = 500; // 5%
+        uint256 amountIncrease = 0.1 ether; // 0.25 WETH for increase
+        uint256 slippageTolerance = 50;
         uint256 deadline = block.timestamp + 3600;
 
         // First: Create initial LP position with USDC
@@ -543,21 +545,24 @@ contract UniswapLPTest is Test {
         IERC20(USDC).approve(address(uniswapLP), amountMint);
 
         vm.prank(user);
-        (uint256 tokenId, , , ) = uniswapLP.swapAndMintLP(
-            USDC,
-            WETH,
-            poolFee,
-            amountMint,
-            tickLower,
-            tickUpper,
-            slippageTolerance,
-            deadline
-        );
+        (uint256 tokenId, , uint256 amount0, uint256 amount1) = uniswapLP
+            .swapAndMintLP(
+                USDC,
+                WETH,
+                poolFee,
+                amountMint,
+                tickLower,
+                tickUpper,
+                slippageTolerance,
+                deadline
+            );
 
         console.log(
             "testSwapAndIncreaseLiquidity_WithWETH: Initial NFT created, tokenId:",
             tokenId
         );
+        console.log("amount0:", amount0);
+        console.log("amount1:", amount1);
 
         // Second: Increase liquidity with WETH
         console.log(
@@ -568,7 +573,7 @@ contract UniswapLPTest is Test {
         IERC20(WETH).approve(address(uniswapLP), amountIncrease);
 
         vm.prank(user);
-        (uint128 liquidity, uint256 amount0, uint256 amount1) = uniswapLP
+        (uint128 liquidity, uint256 amountAdd0, uint256 amountAdd1) = uniswapLP
             .swapAndIncreaseLiquidity(
                 tokenId,
                 WETH,
@@ -584,8 +589,14 @@ contract UniswapLPTest is Test {
             "testSwapAndIncreaseLiquidity_WithWETH: liquidity added:",
             liquidity
         );
-        console.log("testSwapAndIncreaseLiquidity_WithWETH: amount0:", amount0);
-        console.log("testSwapAndIncreaseLiquidity_WithWETH: amount1:", amount1);
+        console.log(
+            "testSwapAndIncreaseLiquidity_WithWETH: amount0:",
+            amountAdd0
+        );
+        console.log(
+            "testSwapAndIncreaseLiquidity_WithWETH: amount1:",
+            amountAdd1
+        );
 
         // Verify results
         assertGt(liquidity, 0, "added liquidity should be greater than 0");

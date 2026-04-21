@@ -26,6 +26,7 @@ $ forge build
 ```shell
 $ forge test
 ```
+forge test --match-path test/UniswapLP.t.sol --match-test testSwapAndIncreaseLiquidity_WithWETH -vvvv
 
 ### Format
 
@@ -56,6 +57,7 @@ $ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --pri
 ```shell
 $ cast <subcommand>
 ```
+cast to-unit $(cast gas-price --rpc-url sepolia) gwei
 
 ### Help
 
