@@ -47,6 +47,12 @@ contract UniswapLP is Ownable {
         uint24 fee,
         uint256 liquidity
     );
+    event LiquidityIncreased(
+        uint256 indexed tokenId,
+        uint128 liquidity,
+        uint256 amount0,
+        uint256 amount1
+    );
     event FeesCollected(address indexed token, uint256 amount);
     event SwapExecuted(
         address indexed tokenIn,
@@ -209,8 +215,6 @@ contract UniswapLP is Ownable {
         uint256 amountIn,
         int24 tickLower,
         int24 tickUpper,
-        uint256 amount0Min,
-        uint256 amount1Min,
         uint256 slippageTolerance,
         uint256 deadline
     )
@@ -291,12 +295,17 @@ contract UniswapLP is Ownable {
                     token0ForSwap
                 );
 
-                // 计算最小输出（考虑滑点）
-                // 这里简化处理：按照比例计算理论输出，然后应用滑点容限
+                // 计算最小输出和价格保护
                 uint256 token1Amount = (amountInAfterFee * ratioToken1) / 100;
                 uint256 amountOutMinimum = token1Amount -
                     (token1Amount * slippageTolerance) /
                     10000;
+
+                // 计算价格保护：允许的最低价格
+                uint160 sqrtPriceLimitX96 = uint160(
+                    (uint256(poolInfo.sqrtPriceX96) *
+                        (10000 - slippageTolerance)) / 10000
+                );
 
                 uint256 amountOut = swapRouter.exactInputSingle(
                     ISwapRouter.ExactInputSingleParams({
@@ -307,7 +316,7 @@ contract UniswapLP is Ownable {
                         deadline: deadline,
                         amountIn: token0ForSwap,
                         amountOutMinimum: amountOutMinimum,
-                        sqrtPriceLimitX96: 0
+                        sqrtPriceLimitX96: sqrtPriceLimitX96
                     })
                 );
 
@@ -331,11 +340,17 @@ contract UniswapLP is Ownable {
                     token1ForSwap
                 );
 
-                // 计算最小输出
+                // 计算最小输出和价格保护
                 uint256 token0Amount = (amountInAfterFee * ratioToken0) / 100;
                 uint256 amountOutMinimum = token0Amount -
                     (token0Amount * slippageTolerance) /
                     10000;
+
+                // 计算价格保护：允许的最高价格（token1兑token0）
+                uint160 sqrtPriceLimitX96 = uint160(
+                    (uint256(poolInfo.sqrtPriceX96) *
+                        (10000 + slippageTolerance)) / 10000
+                );
 
                 uint256 amountOut = swapRouter.exactInputSingle(
                     ISwapRouter.ExactInputSingleParams({
@@ -346,7 +361,7 @@ contract UniswapLP is Ownable {
                         deadline: deadline,
                         amountIn: token1ForSwap,
                         amountOutMinimum: amountOutMinimum,
-                        sqrtPriceLimitX96: 0
+                        sqrtPriceLimitX96: sqrtPriceLimitX96
                     })
                 );
 
@@ -359,6 +374,20 @@ contract UniswapLP is Ownable {
                 amount1Desired = amountInAfterFee;
             }
         }
+
+        // 计算 amount0Min 和 amount1Min
+        uint256 amount0Min = amount0Desired -
+            (amount0Desired * slippageTolerance) /
+            10000;
+        uint256 amount1Min = amount1Desired -
+            (amount1Desired * slippageTolerance) /
+            10000;
+        require(
+            (amount0Min == 0 && amount1Min > 0) ||
+                (amount0Min > 0 && amount1Min == 0) ||
+                (amount0Min > 0 && amount1Min > 0),
+            "amount min value error"
+        );
 
         // 批准 position manager
         IERC20(poolInfo.token0).safeIncreaseAllowance(
@@ -380,8 +409,8 @@ contract UniswapLP is Ownable {
                 tickUpper: tickUpper,
                 amount0Desired: amount0Desired,
                 amount1Desired: amount1Desired,
-                amount0Min: amount0Min,
-                amount1Min: amount1Min,
+                amount0Min: (amount0Min > 0 ? amount0Min : 0),
+                amount1Min: (amount1Min > 0 ? amount1Min : 0),
                 recipient: msg.sender,
                 deadline: deadline
             })
@@ -412,7 +441,227 @@ contract UniswapLP is Ownable {
         }
     }
 
-    // 紧急提取函数
+    // 增加指定 NFT LP 的流动性 - 支持单边资产投入，自动 swap 调整比例
+    function swapAndIncreaseLiquidity(
+        uint256 tokenId,
+        address tokenIn,
+        uint256 amountIn,
+        uint256 slippageTolerance,
+        uint256 deadline
+    )
+        external
+        payable
+        returns (uint128 liquidity, uint256 amount0, uint256 amount1)
+    {
+        require(amountIn > 0, "Invalid amount");
+        require(slippageTolerance <= 10000, "Slippage too high");
+        require(deadline >= block.timestamp, "Deadline exceeded");
+
+        // 获取 NFT 位置信息
+        (
+            ,
+            ,
+            address token0,
+            address token1,
+            uint24 fee,
+            int24 tickLower,
+            int24 tickUpper,
+            ,
+            ,
+            ,
+            ,
+
+        ) = positionManager.positions(tokenId);
+
+        require(token0 != address(0) && token1 != address(0), "Invalid NFT");
+        require(
+            (tokenIn == token0 || tokenIn == token1),
+            "Invalid token input"
+        );
+
+        // 处理 ETH 转 WETH
+        if (tokenIn == address(weth) && msg.value > 0) {
+            require(msg.value == amountIn, "ETH amount mismatch");
+            weth.deposit{value: msg.value}();
+        }
+
+        // 获取 pool 信息和投入比例
+        PoolInfo memory poolInfo = getPoolInfo(token0, token1, fee);
+        (uint256 ratioToken0, uint256 ratioToken1) = getUniDirectionalRatio(
+            token0,
+            token1,
+            fee,
+            tickLower,
+            tickUpper
+        );
+
+        // 收取手续费
+        uint256 protocolFeeAmount = calculateFee(amountIn);
+        uint256 amountInAfterFee = amountIn - protocolFeeAmount;
+
+        if (protocolFeeAmount > 0) {
+            if (tokenIn == address(weth) && msg.value > 0) {
+                IERC20(address(weth)).safeTransfer(
+                    feeRecipient,
+                    protocolFeeAmount
+                );
+            } else {
+                IERC20(tokenIn).safeTransferFrom(
+                    msg.sender,
+                    feeRecipient,
+                    protocolFeeAmount
+                );
+            }
+        }
+
+        // 转入用户的代币（如果不是通过 ETH 已转入）
+        if (!(tokenIn == address(weth) && msg.value > 0)) {
+            IERC20(tokenIn).safeTransferFrom(
+                msg.sender,
+                address(this),
+                amountInAfterFee
+            );
+        }
+
+        uint256 amount0Desired;
+        uint256 amount1Desired;
+
+        // 确定投入的 token 方向（是 token0 还是 token1）
+        bool isToken0Input = (tokenIn == token0);
+
+        // 计算需要的投入量
+        if (isToken0Input) {
+            // 用户投入 token0，需要 swap 一部分换成 token1
+            uint256 token0Amount = (amountInAfterFee * ratioToken0) / 100;
+            uint256 token0ForSwap = amountInAfterFee - token0Amount;
+
+            if (token0ForSwap > 0) {
+                // 需要 swap
+                IERC20(token0).safeIncreaseAllowance(
+                    address(swapRouter),
+                    token0ForSwap
+                );
+
+                uint256 token1Amount = (amountInAfterFee * ratioToken1) / 100;
+                uint256 amountOutMinimum = token1Amount -
+                    (token1Amount * slippageTolerance) /
+                    10000;
+
+                // 计算价格保护
+                uint160 sqrtPriceLimitX96 = uint160(
+                    (uint256(poolInfo.sqrtPriceX96) *
+                        (10000 - slippageTolerance)) / 10000
+                );
+
+                uint256 amountOut = swapRouter.exactInputSingle(
+                    ISwapRouter.ExactInputSingleParams({
+                        tokenIn: token0,
+                        tokenOut: token1,
+                        fee: fee,
+                        recipient: address(this),
+                        deadline: deadline,
+                        amountIn: token0ForSwap,
+                        amountOutMinimum: amountOutMinimum,
+                        sqrtPriceLimitX96: sqrtPriceLimitX96
+                    })
+                );
+
+                emit SwapExecuted(token0, token1, token0ForSwap, amountOut);
+                amount0Desired = token0Amount;
+                amount1Desired = amountOut;
+            } else {
+                // 无需 swap
+                amount0Desired = amountInAfterFee;
+                amount1Desired = 0;
+            }
+        } else {
+            // 用户投入 token1，需要 swap 一部分换成 token0
+            uint256 token1Amount = (amountInAfterFee * ratioToken1) / 100;
+            uint256 token1ForSwap = amountInAfterFee - token1Amount;
+
+            if (token1ForSwap > 0) {
+                // 需要 swap
+                IERC20(token1).safeIncreaseAllowance(
+                    address(swapRouter),
+                    token1ForSwap
+                );
+
+                uint256 token0Amount = (amountInAfterFee * ratioToken0) / 100;
+                uint256 amountOutMinimum = token0Amount -
+                    (token0Amount * slippageTolerance) /
+                    10000;
+
+                // 计算价格保护
+                uint160 sqrtPriceLimitX96 = uint160(
+                    (uint256(poolInfo.sqrtPriceX96) *
+                        (10000 + slippageTolerance)) / 10000
+                );
+
+                uint256 amountOut = swapRouter.exactInputSingle(
+                    ISwapRouter.ExactInputSingleParams({
+                        tokenIn: token1,
+                        tokenOut: token0,
+                        fee: fee,
+                        recipient: address(this),
+                        deadline: deadline,
+                        amountIn: token1ForSwap,
+                        amountOutMinimum: amountOutMinimum,
+                        sqrtPriceLimitX96: sqrtPriceLimitX96
+                    })
+                );
+
+                emit SwapExecuted(token1, token0, token1ForSwap, amountOut);
+                amount0Desired = amountOut;
+                amount1Desired = token1Amount;
+            } else {
+                // 无需 swap
+                amount0Desired = 0;
+                amount1Desired = amountInAfterFee;
+            }
+        }
+
+        // 计算 amount0Min 和 amount1Min
+        uint256 amount0Min = amount0Desired -
+            (amount0Desired * slippageTolerance) /
+            10000;
+        uint256 amount1Min = amount1Desired -
+            (amount1Desired * slippageTolerance) /
+            10000;
+        require(
+            (amount0Min == 0 && amount1Min > 0) ||
+                (amount0Min > 0 && amount1Min == 0) ||
+                (amount0Min > 0 && amount1Min > 0),
+            "amount min value error"
+        );
+
+        // 批准 position manager
+        IERC20(token0).safeIncreaseAllowance(
+            address(positionManager),
+            amount0Desired
+        );
+        IERC20(token1).safeIncreaseAllowance(
+            address(positionManager),
+            amount1Desired
+        );
+
+        // 增加流动性
+        (liquidity, amount0, amount1) = positionManager.increaseLiquidity(
+            INonfungiblePositionManager.IncreaseLiquidityParams({
+                tokenId: tokenId,
+                amount0Desired: amount0Desired,
+                amount1Desired: amount1Desired,
+                amount0Min: (amount0Min > 0 ? amount0Min : 0),
+                amount1Min: (amount1Min > 0 ? amount1Min : 0),
+                deadline: deadline
+            })
+        );
+
+        // 清理剩余代币
+        _cleanupTokens(token0, token1);
+
+        emit LiquidityIncreased(tokenId, liquidity, amount0, amount1);
+    }
+
     function emergencyWithdraw(address token) external onlyOwner {
         uint256 balance = IERC20(token).balanceOf(address(this));
         if (balance > 0) {
