@@ -58,32 +58,6 @@ contract UniswapLP is Ownable {
         uint160 sqrtPriceX96;
     }
 
-    struct MintLocalVars {
-        uint256 ratioToken0;
-        uint256 ratioToken1;
-        uint256 protocolFeeAmount;
-        uint256 amountInAfterFee;
-        uint256 amount0Desired;
-        uint256 amount1Desired;
-        uint256 amount0Min;
-        uint256 amount1Min;
-    }
-    struct IncreaseLiquidityLocalVars {
-        address token0;
-        address token1;
-        uint24 fee;
-        int24 tickLower;
-        int24 tickUpper;
-        uint256 ratioToken0;
-        uint256 ratioToken1;
-        uint256 protocolFeeAmount;
-        uint256 amountInAfterFee;
-        uint256 amount0Desired;
-        uint256 amount1Desired;
-        uint256 amount0Min;
-        uint256 amount1Min;
-    }
-
     event WhitelistUpdated(address indexed user, bool status);
     event ProtocolFeeUpdated(uint256 newFee);
     event FeeRecipientUpdated(address newRecipient);
@@ -262,119 +236,124 @@ contract UniswapLP is Ownable {
 
         // 获取 pool 信息
         PoolInfo memory poolInfo = getPoolInfo(tokenIn, tokenOut, poolFee);
-        MintLocalVars memory v;
 
         // 获取目标价格范围的投入比例
-        (v.ratioToken0, v.ratioToken1) = getUniDirectionalRatio(
-            tokenIn,
-            tokenOut,
-            poolFee,
-            tickLower,
-            tickUpper
-        );
+        uint256 amount0Desired;
+        uint256 amount1Desired;
+        uint256 amount0Min = 0;
+        uint256 amount1Min = 0;
+        {
+            (uint256 ratioToken0, uint256 ratioToken1) = getUniDirectionalRatio(
+                tokenIn,
+                tokenOut,
+                poolFee,
+                tickLower,
+                tickUpper
+            );
 
-        // 收取手续费
-        v.protocolFeeAmount = calculateFee(amountIn);
-        v.amountInAfterFee = amountIn - v.protocolFeeAmount;
+            // 收取手续费
+            uint256 protocolFeeAmount = calculateFee(amountIn);
+            uint256 amountInAfterFee = amountIn - protocolFeeAmount;
 
-        if (v.protocolFeeAmount > 0) {
-            if (tokenIn == address(wethLocal) && msg.value > 0) {
-                // 已从合约的 WETH 余额中支付手续费
-                IERC20(address(wethLocal)).safeTransfer(
-                    feeRecipient,
-                    v.protocolFeeAmount
-                );
-            } else {
-                // 从用户账户转移代币作为手续费
+            if (protocolFeeAmount > 0) {
+                if (tokenIn == address(wethLocal) && msg.value > 0) {
+                    // 已从合约的 WETH 余额中支付手续费
+                    IERC20(address(wethLocal)).safeTransfer(
+                        feeRecipient,
+                        protocolFeeAmount
+                    );
+                } else {
+                    // 从用户账户转移代币作为手续费
+                    IERC20(tokenIn).safeTransferFrom(
+                        msg.sender,
+                        feeRecipient,
+                        protocolFeeAmount
+                    );
+                }
+            }
+
+            // 转入用户的代币（如果不是通过 ETH 已转入）
+            if (!(tokenIn == address(wethLocal) && msg.value > 0)) {
                 IERC20(tokenIn).safeTransferFrom(
                     msg.sender,
-                    feeRecipient,
-                    v.protocolFeeAmount
+                    address(this),
+                    amountInAfterFee
                 );
             }
-        }
 
-        // 转入用户的代币（如果不是通过 ETH 已转入）
-        if (!(tokenIn == address(wethLocal) && msg.value > 0)) {
-            IERC20(tokenIn).safeTransferFrom(
-                msg.sender,
-                address(this),
-                v.amountInAfterFee
-            );
-        }
+            // 计算需要的 token0 和 token1 的投入量（按比例分配）
+            if (tokenIn == poolInfo.token0) {
+                // 用户投入 token0，需要 swap 一部分换成 token1
+                uint256 token0Amount = (amountInAfterFee * ratioToken0) /
+                    PERCENTAGE_BASE;
+                uint256 token0ForSwap = amountInAfterFee - token0Amount;
 
-        // 计算需要的 token0 和 token1 的投入量（按比例分配）
-        if (tokenIn == poolInfo.token0) {
-            // 用户投入 token0，需要 swap 一部分换成 token1
-            uint256 token0Amount = (v.amountInAfterFee * v.ratioToken0) /
-                PERCENTAGE_BASE;
-            uint256 token0ForSwap = v.amountInAfterFee - token0Amount;
-
-            if (token0ForSwap > 0) {
-                uint256 amountOut = _executeSwap(
-                    tokenIn,
-                    tokenOut,
-                    token0ForSwap,
-                    poolFee,
-                    slippageTolerance,
-                    deadline
-                );
-                v.amount0Desired = token0Amount;
-                v.amount1Desired = amountOut;
+                if (token0ForSwap > 0) {
+                    uint256 amountOut = _executeSwap(
+                        tokenIn,
+                        tokenOut,
+                        token0ForSwap,
+                        poolFee,
+                        slippageTolerance,
+                        deadline
+                    );
+                    amount0Desired = token0Amount;
+                    amount1Desired = amountOut;
+                } else {
+                    // 无需 swap，全部投入 token0
+                    amount0Desired = amountInAfterFee;
+                    amount1Desired = 0;
+                }
             } else {
-                // 无需 swap，全部投入 token0
-                v.amount0Desired = v.amountInAfterFee;
-                v.amount1Desired = 0;
-            }
-        } else {
-            // 用户投入 token1，需要 swap 一部分换成 token0
-            uint256 token1Amount = (v.amountInAfterFee * v.ratioToken1) /
-                PERCENTAGE_BASE;
-            uint256 token1ForSwap = v.amountInAfterFee - token1Amount;
+                // 用户投入 token1，需要 swap 一部分换成 token0
+                uint256 token1Amount = (amountInAfterFee * ratioToken1) /
+                    PERCENTAGE_BASE;
+                uint256 token1ForSwap = amountInAfterFee - token1Amount;
 
-            if (token1ForSwap > 0) {
-                uint256 amountOut = _executeSwap(
-                    tokenIn,
-                    tokenOut,
-                    token1ForSwap,
-                    poolFee,
-                    slippageTolerance,
-                    deadline
-                );
-                v.amount0Desired = amountOut;
-                v.amount1Desired = token1Amount;
-            } else {
-                // 无需 swap，全部投入 token1
-                v.amount0Desired = 0;
-                v.amount1Desired = v.amountInAfterFee;
+                if (token1ForSwap > 0) {
+                    uint256 amountOut = _executeSwap(
+                        tokenIn,
+                        tokenOut,
+                        token1ForSwap,
+                        poolFee,
+                        slippageTolerance,
+                        deadline
+                    );
+                    amount0Desired = amountOut;
+                    amount1Desired = token1Amount;
+                } else {
+                    // 无需 swap，全部投入 token1
+                    amount0Desired = 0;
+                    amount1Desired = amountInAfterFee;
+                }
             }
         }
 
         // 计算 amount0Min 和 amount1Min
-        if (v.amount0Desired == 0) {
-            v.amount1Min =
-                (v.amount1Desired * (PERCENTAGE_BASE - slippageTolerance)) /
+        if (amount0Desired == 0) {
+            amount1Min =
+                (amount1Desired * (PERCENTAGE_BASE - slippageTolerance)) /
                 PERCENTAGE_BASE;
-        } else if (v.amount1Desired == 0) {
-            v.amount0Min =
-                (v.amount0Desired * (PERCENTAGE_BASE - slippageTolerance)) /
+        } else if (amount1Desired == 0) {
+            amount0Min =
+                (amount0Desired * (PERCENTAGE_BASE - slippageTolerance)) /
                 PERCENTAGE_BASE;
         } else {
-            v.amount0Min = 0;
-            v.amount1Min = 0;
+            amount0Min = 0;
+            amount1Min = 0;
         }
 
         // 批准 position manager
-        if (v.amount0Desired > 0) {
+        if (amount0Desired > 0) {
             IERC20(poolInfo.token0).safeIncreaseAllowance(
                 address(positionManagerLocal),
-                v.amount0Desired
+                amount0Desired
             );
         }
-        if (v.amount1Desired > 0) {
+        if (amount1Desired > 0) {
             IERC20(poolInfo.token1).safeIncreaseAllowance(
                 address(positionManagerLocal),
-                v.amount1Desired
+                amount1Desired
             );
         }
 
@@ -386,10 +365,10 @@ contract UniswapLP is Ownable {
                 fee: poolFee,
                 tickLower: tickLower,
                 tickUpper: tickUpper,
-                amount0Desired: v.amount0Desired,
-                amount1Desired: v.amount1Desired,
-                amount0Min: v.amount0Min,
-                amount1Min: v.amount1Min,
+                amount0Desired: amount0Desired,
+                amount1Desired: amount1Desired,
+                amount0Min: amount0Min,
+                amount1Min: amount1Min,
                 recipient: msg.sender,
                 deadline: deadline
             })
@@ -504,145 +483,155 @@ contract UniswapLP is Ownable {
             revert NotNFTOwner();
 
         IWETH wethLocal = weth;
-        IncreaseLiquidityLocalVars memory v;
 
         // 获取 NFT 位置信息
-        (
-            ,
-            ,
-            v.token0,
-            v.token1,
-            v.fee,
-            v.tickLower,
-            v.tickUpper,
-            ,
-            ,
-            ,
-            ,
+        uint256 amount0Desired;
+        uint256 amount1Desired;
+        uint256 amount0Min = 0;
+        uint256 amount1Min = 0;
+        address token0;
+        address token1;
+        {
+            uint24 fee;
+            int24 tickLower;
+            int24 tickUpper;
+            (
+                ,
+                ,
+                token0,
+                token1,
+                fee,
+                tickLower,
+                tickUpper,
+                ,
+                ,
+                ,
+                ,
 
-        ) = positionManagerLocal.positions(tokenId);
+            ) = positionManagerLocal.positions(tokenId);
 
-        if (v.token0 == address(0) || v.token1 == address(0))
-            revert InvalidNFT();
-        if (tokenIn != v.token0 && tokenIn != v.token1)
-            revert InvalidTokenInput();
+            if (token0 == address(0) || token1 == address(0))
+                revert InvalidNFT();
+            if (tokenIn != token0 && tokenIn != token1)
+                revert InvalidTokenInput();
 
-        // 处理 ETH 转 WETH
-        if (tokenIn == address(wethLocal) && msg.value > 0) {
-            if (msg.value != amountIn) revert EthAmountMismatch();
-            wethLocal.deposit{value: msg.value}();
-        }
-
-        // 获取投入比例
-        (v.ratioToken0, v.ratioToken1) = getUniDirectionalRatio(
-            v.token0,
-            v.token1,
-            v.fee,
-            v.tickLower,
-            v.tickUpper
-        );
-
-        // 收取手续费
-        v.protocolFeeAmount = calculateFee(amountIn);
-        v.amountInAfterFee = amountIn - v.protocolFeeAmount;
-
-        if (v.protocolFeeAmount > 0) {
+            // 处理 ETH 转 WETH
             if (tokenIn == address(wethLocal) && msg.value > 0) {
-                IERC20(address(wethLocal)).safeTransfer(
-                    feeRecipient,
-                    v.protocolFeeAmount
-                );
-            } else {
+                if (msg.value != amountIn) revert EthAmountMismatch();
+                wethLocal.deposit{value: msg.value}();
+            }
+
+            // 获取投入比例
+            (uint256 ratioToken0, uint256 ratioToken1) = getUniDirectionalRatio(
+                token0,
+                token1,
+                fee,
+                tickLower,
+                tickUpper
+            );
+
+            // 收取手续费
+            uint256 protocolFeeAmount = calculateFee(amountIn);
+            uint256 amountInAfterFee = amountIn - protocolFeeAmount;
+
+            if (protocolFeeAmount > 0) {
+                if (tokenIn == address(wethLocal) && msg.value > 0) {
+                    IERC20(address(wethLocal)).safeTransfer(
+                        feeRecipient,
+                        protocolFeeAmount
+                    );
+                } else {
+                    IERC20(tokenIn).safeTransferFrom(
+                        msg.sender,
+                        feeRecipient,
+                        protocolFeeAmount
+                    );
+                }
+            }
+
+            // 转入用户的代币（如果不是通过 ETH 已转入）
+            if (!(tokenIn == address(wethLocal) && msg.value > 0)) {
                 IERC20(tokenIn).safeTransferFrom(
                     msg.sender,
-                    feeRecipient,
-                    v.protocolFeeAmount
+                    address(this),
+                    amountInAfterFee
                 );
             }
-        }
 
-        // 转入用户的代币（如果不是通过 ETH 已转入）
-        if (!(tokenIn == address(wethLocal) && msg.value > 0)) {
-            IERC20(tokenIn).safeTransferFrom(
-                msg.sender,
-                address(this),
-                v.amountInAfterFee
-            );
-        }
+            // 确定投入的 token 方向（是 token0 还是 token1）
+            // 计算需要的投入量
+            if (tokenIn == token0) {
+                // 用户投入 token0，需要 swap 一部分换成 token1
+                uint256 token0Amount = (amountInAfterFee * ratioToken0) /
+                    PERCENTAGE_BASE;
+                uint256 token0ForSwap = amountInAfterFee - token0Amount;
 
-        // 确定投入的 token 方向（是 token0 还是 token1）
-        // 计算需要的投入量
-        if (tokenIn == v.token0) {
-            // 用户投入 token0，需要 swap 一部分换成 token1
-            uint256 token0Amount = (v.amountInAfterFee * v.ratioToken0) /
-                PERCENTAGE_BASE;
-            uint256 token0ForSwap = v.amountInAfterFee - token0Amount;
-
-            if (token0ForSwap > 0) {
-                uint256 amountOut = _executeSwap(
-                    v.token0,
-                    v.token1,
-                    token0ForSwap,
-                    v.fee,
-                    slippageTolerance,
-                    deadline
-                );
-                v.amount0Desired = token0Amount;
-                v.amount1Desired = amountOut;
+                if (token0ForSwap > 0) {
+                    uint256 amountOut = _executeSwap(
+                        token0,
+                        token1,
+                        token0ForSwap,
+                        fee,
+                        slippageTolerance,
+                        deadline
+                    );
+                    amount0Desired = token0Amount;
+                    amount1Desired = amountOut;
+                } else {
+                    // 无需 swap
+                    amount0Desired = amountInAfterFee;
+                    amount1Desired = 0;
+                }
             } else {
-                // 无需 swap
-                v.amount0Desired = v.amountInAfterFee;
-                v.amount1Desired = 0;
-            }
-        } else {
-            // 用户投入 token1，需要 swap 一部分换成 token0
-            uint256 token1Amount = (v.amountInAfterFee * v.ratioToken1) /
-                PERCENTAGE_BASE;
-            uint256 token1ForSwap = v.amountInAfterFee - token1Amount;
+                // 用户投入 token1，需要 swap 一部分换成 token0
+                uint256 token1Amount = (amountInAfterFee * ratioToken1) /
+                    PERCENTAGE_BASE;
+                uint256 token1ForSwap = amountInAfterFee - token1Amount;
 
-            if (token1ForSwap > 0) {
-                uint256 amountOut = _executeSwap(
-                    v.token1,
-                    v.token0,
-                    token1ForSwap,
-                    v.fee,
-                    slippageTolerance,
-                    deadline
-                );
-                v.amount0Desired = amountOut;
-                v.amount1Desired = token1Amount;
-            } else {
-                // 无需 swap
-                v.amount0Desired = 0;
-                v.amount1Desired = v.amountInAfterFee;
+                if (token1ForSwap > 0) {
+                    uint256 amountOut = _executeSwap(
+                        token1,
+                        token0,
+                        token1ForSwap,
+                        fee,
+                        slippageTolerance,
+                        deadline
+                    );
+                    amount0Desired = amountOut;
+                    amount1Desired = token1Amount;
+                } else {
+                    // 无需 swap
+                    amount0Desired = 0;
+                    amount1Desired = amountInAfterFee;
+                }
             }
         }
 
         // 计算 amount0Min 和 amount1Min
-        if (v.amount0Desired == 0) {
-            v.amount1Min =
-                (v.amount1Desired * (PERCENTAGE_BASE - slippageTolerance)) /
+        if (amount0Desired == 0) {
+            amount1Min =
+                (amount1Desired * (PERCENTAGE_BASE - slippageTolerance)) /
                 PERCENTAGE_BASE;
-        } else if (v.amount1Desired == 0) {
-            v.amount0Min =
-                (v.amount0Desired * (PERCENTAGE_BASE - slippageTolerance)) /
+        } else if (amount1Desired == 0) {
+            amount0Min =
+                (amount0Desired * (PERCENTAGE_BASE - slippageTolerance)) /
                 PERCENTAGE_BASE;
         } else {
-            v.amount0Min = 0;
-            v.amount1Min = 0;
+            amount0Min = 0;
+            amount1Min = 0;
         }
 
         // 批准 position manager
-        if (v.amount0Desired > 0) {
-            IERC20(v.token0).safeIncreaseAllowance(
+        if (amount0Desired > 0) {
+            IERC20(token0).safeIncreaseAllowance(
                 address(positionManagerLocal),
-                v.amount0Desired
+                amount0Desired
             );
         }
-        if (v.amount1Desired > 0) {
-            IERC20(v.token1).safeIncreaseAllowance(
+        if (amount1Desired > 0) {
+            IERC20(token1).safeIncreaseAllowance(
                 address(positionManagerLocal),
-                v.amount1Desired
+                amount1Desired
             );
         }
 
@@ -650,16 +639,16 @@ contract UniswapLP is Ownable {
         (liquidity, amount0, amount1) = positionManagerLocal.increaseLiquidity(
             INonfungiblePositionManager.IncreaseLiquidityParams({
                 tokenId: tokenId,
-                amount0Desired: v.amount0Desired,
-                amount1Desired: v.amount1Desired,
-                amount0Min: v.amount0Min,
-                amount1Min: v.amount1Min,
+                amount0Desired: amount0Desired,
+                amount1Desired: amount1Desired,
+                amount0Min: amount0Min,
+                amount1Min: amount1Min,
                 deadline: deadline
             })
         );
 
         // 清理剩余代币
-        _cleanupTokens(v.token0, v.token1);
+        _cleanupTokens(token0, token1);
 
         emit LiquidityIncreased(tokenId, liquidity, amount0, amount1);
     }
