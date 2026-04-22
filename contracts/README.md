@@ -26,7 +26,7 @@ $ forge build
 ```shell
 $ forge test
 ```
-forge test --match-path test/UniswapLP.t.sol --match-test testSwapAndIncreaseLiquidity_WithWETH -vvvv
+forge test --match-path test/UniswapLP.t.sol --match-test testSwapAndIncreaseLiquidity_WithWETH -vvvv --gas-report
 
 ### Format
 
@@ -74,3 +74,16 @@ forge install OpenZeppelin/openzeppelin-contracts@v3.4.2-solc-0.7
 forge install OpenZeppelin/openzeppelin-contracts@v4.9.6
 forge install Uniswap/v3-core
 forge install Uniswap/v3-periphery
+
+
+
+forge inspect UniswapLP bytecode | wc -c
+
+### deploy
+require
+forge inspect UniswapLP bytecode | wc -c
+23575
+
+error
+forge inspect UniswapLP bytecode | wc -c
+22753
