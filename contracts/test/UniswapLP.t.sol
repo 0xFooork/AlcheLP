@@ -183,20 +183,21 @@ contract UniswapLPTest is Test {
         address USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
         uint24 poolFee = 500; // 0.05%
 
-        UniswapLP.PoolInfo memory poolInfo = uniswapLP.getPoolInfo(
-            USDC,
-            WETH,
-            poolFee
-        );
+        (
+            address token0,
+            address token1,
+            int24 tick,
+            uint160 sqrtPriceX96
+        ) = uniswapLP.getPoolInfo(USDC, WETH, poolFee);
         console.log("testGetPoolInfo: Pool info retrieved successfully");
-        console.log("testGetPoolInfo: token0:", poolInfo.token0);
-        console.log("testGetPoolInfo: token1:", poolInfo.token1);
-        console.log("testGetPoolInfo: currentTick:", poolInfo.currentTick);
-        console.log("testGetPoolInfo: sqrtPriceX96:", poolInfo.sqrtPriceX96);
+        console.log("testGetPoolInfo: token0:", token0);
+        console.log("testGetPoolInfo: token1:", token1);
+        console.log("testGetPoolInfo: currentTick:", tick);
+        console.log("testGetPoolInfo: sqrtPriceX96:", sqrtPriceX96);
 
-        assertNotEq(poolInfo.token0, address(0));
-        assertNotEq(poolInfo.token1, address(0));
-        assertNotEq(poolInfo.sqrtPriceX96, 0);
+        assertNotEq(token0, address(0));
+        assertNotEq(token1, address(0));
+        assertNotEq(sqrtPriceX96, 0);
         console.log("testGetPoolInfo: PASSED");
     }
 
@@ -208,19 +209,15 @@ contract UniswapLPTest is Test {
         int24 tickLower = 290000; // Example tick range
         int24 tickUpper = 300000;
 
-        UniswapLP.PoolInfo memory poolInfo = uniswapLP.getPoolInfo(
-            USDC,
-            WETH,
-            poolFee
-        );
+        (, , int24 currentTick, ) = uniswapLP.getPoolInfo(USDC, WETH, poolFee);
         console.log("testNeedsSwap: Pool info retrieved");
-        console.log("testNeedsSwap: Current tick:", poolInfo.currentTick);
+        console.log("testNeedsSwap: Current tick:", currentTick);
         console.log("testNeedsSwap: Tick lower:", tickLower);
         console.log("testNeedsSwap: Tick upper:", tickUpper);
 
         // Determine if swap is needed based on tick range
-        bool tickBelowRange = poolInfo.currentTick < tickLower;
-        bool tickAboveRange = poolInfo.currentTick > tickUpper;
+        bool tickBelowRange = currentTick < tickLower;
+        bool tickAboveRange = currentTick > tickUpper;
         bool needsSwap = tickBelowRange || tickAboveRange;
 
         console.log("testNeedsSwap: Tick below range", tickBelowRange);
@@ -228,11 +225,11 @@ contract UniswapLPTest is Test {
         console.log("testNeedsSwap: Needs swap", needsSwap);
 
         // Validate logic
-        if (poolInfo.currentTick < tickLower) {
+        if (currentTick < tickLower) {
             console.log(
                 "testNeedsSwap: Price below range, should deposit token0"
             );
-        } else if (poolInfo.currentTick > tickUpper) {
+        } else if (currentTick > tickUpper) {
             console.log(
                 "testNeedsSwap: Price above range, should deposit token1"
             );
@@ -250,25 +247,23 @@ contract UniswapLPTest is Test {
         address USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
         uint24 poolFee = 500; // 0.05%
 
-        UniswapLP.PoolInfo memory poolInfo = uniswapLP.getPoolInfo(
+        (, , , uint160 sqrtPriceX96) = uniswapLP.getPoolInfo(
             USDC,
             WETH,
             poolFee
         );
         console.log(
             "testSlippageAndPriceProtection: Current sqrtPriceX96:",
-            poolInfo.sqrtPriceX96
+            sqrtPriceX96
         );
 
         // Test slippage tolerance calculation
         uint256 slippageTolerance = 100; // 1%
         uint160 sqrtPriceLimitX96Down = uint160(
-            (uint256(poolInfo.sqrtPriceX96) * (10000 - slippageTolerance)) /
-                10000
+            (uint256(sqrtPriceX96) * (10000 - slippageTolerance)) / 10000
         );
         uint160 sqrtPriceLimitX96Up = uint160(
-            (uint256(poolInfo.sqrtPriceX96) * (10000 + slippageTolerance)) /
-                10000
+            (uint256(sqrtPriceX96) * (10000 + slippageTolerance)) / 10000
         );
 
         console.log(
@@ -280,8 +275,8 @@ contract UniswapLPTest is Test {
             sqrtPriceLimitX96Up
         );
 
-        assertTrue(sqrtPriceLimitX96Down < poolInfo.sqrtPriceX96);
-        assertTrue(sqrtPriceLimitX96Up > poolInfo.sqrtPriceX96);
+        assertTrue(sqrtPriceLimitX96Down < sqrtPriceX96);
+        assertTrue(sqrtPriceLimitX96Up > sqrtPriceX96);
 
         console.log(
             "testSlippageAndPriceProtection: Price protection verified"
@@ -301,19 +296,13 @@ contract UniswapLPTest is Test {
         uint256 deadline = block.timestamp + 3600;
 
         // Get pool info to determine token order
-        UniswapLP.PoolInfo memory poolInfo = uniswapLP.getPoolInfo(
+        (address token0, address token1, , ) = uniswapLP.getPoolInfo(
             USDC,
             WETH,
             poolFee
         );
-        console.log(
-            "testSwapAndMintLP_WithUSDC: Pool token0:",
-            poolInfo.token0
-        );
-        console.log(
-            "testSwapAndMintLP_WithUSDC: Pool token1:",
-            poolInfo.token1
-        );
+        console.log("testSwapAndMintLP_WithUSDC: Pool token0:", token0);
+        console.log("testSwapAndMintLP_WithUSDC: Pool token1:", token1);
 
         // Allocate USDC to user
         deal(USDC, user, amountIn);
@@ -372,19 +361,13 @@ contract UniswapLPTest is Test {
         uint256 deadline = block.timestamp + 3600;
 
         // Get pool info
-        UniswapLP.PoolInfo memory poolInfo = uniswapLP.getPoolInfo(
+        (address token0, address token1, , ) = uniswapLP.getPoolInfo(
             USDC,
             WETH,
             poolFee
         );
-        console.log(
-            "testSwapAndMintLP_WithWETH: Pool token0:",
-            poolInfo.token0
-        );
-        console.log(
-            "testSwapAndMintLP_WithWETH: Pool token1:",
-            poolInfo.token1
-        );
+        console.log("testSwapAndMintLP_WithWETH: Pool token0:", token0);
+        console.log("testSwapAndMintLP_WithWETH: Pool token1:", token1);
 
         // Allocate WETH to user
         deal(WETH, user, amountIn);
@@ -449,14 +432,10 @@ contract UniswapLPTest is Test {
         );
         deal(USDC, user, amountMint + amountIncrease);
 
-        UniswapLP.PoolInfo memory poolInfo = uniswapLP.getPoolInfo(
-            USDC,
-            WETH,
-            poolFee
-        );
+        (, , int24 tick, ) = uniswapLP.getPoolInfo(USDC, WETH, poolFee);
         console.log(
             "testSwapAndIncreaseLiquidity_WithUSDC: Current tick:",
-            poolInfo.currentTick
+            tick
         );
 
         vm.prank(user);
@@ -541,6 +520,12 @@ contract UniswapLPTest is Test {
         deal(USDC, user, amountMint);
         deal(WETH, user, amountIncrease);
 
+        (, , int24 tick, ) = uniswapLP.getPoolInfo(USDC, WETH, poolFee);
+        console.log(
+            "testSwapAndIncreaseLiquidity_WithWETH: Current tick:",
+            tick
+        );
+
         vm.prank(user);
         IERC20(USDC).approve(address(uniswapLP), amountMint);
 
@@ -563,6 +548,14 @@ contract UniswapLPTest is Test {
         );
         console.log("amount0:", amount0);
         console.log("amount1:", amount1);
+        console.log(
+            "balance of token0 after mint:",
+            IERC20(USDC).balanceOf(user)
+        );
+        console.log(
+            "balance of token1 after mint:",
+            IERC20(WETH).balanceOf(user)
+        );
 
         // Second: Increase liquidity with WETH
         console.log(
@@ -597,6 +590,14 @@ contract UniswapLPTest is Test {
             "testSwapAndIncreaseLiquidity_WithWETH: amount1:",
             amountAdd1
         );
+        console.log(
+            "balance of token0 after swapAndIncreaseLiquidity:",
+            IERC20(USDC).balanceOf(user)
+        );
+        console.log(
+            "balance of token1 after swapAndIncreaseLiquidity:",
+            IERC20(WETH).balanceOf(user)
+        );
 
         // Verify results
         assertGt(liquidity, 0, "added liquidity should be greater than 0");
@@ -612,10 +613,10 @@ contract UniswapLPTest is Test {
         console.log("testSwapAndMintLP_WithSlippageProtection: Start testing");
         address USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
         uint24 poolFee = 500; // 0.05%
-        int24 tickLower = 193000;
-        int24 tickUpper = 197000;
+        int24 tickLower = 191140;
+        int24 tickUpper = 199360;
         uint256 amountIn = 1000e6; // 1000 USDC
-        uint256 slippageTolerance = 100; // 1% slippage
+        uint256 slippageTolerance = 10; // 1% slippage
         uint256 deadline = block.timestamp + 3600;
 
         console.log(

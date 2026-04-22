@@ -51,13 +51,6 @@ contract UniswapLP is Ownable {
 
     mapping(address => bool) public whitelist;
 
-    struct PoolInfo {
-        address token0;
-        address token1;
-        int24 currentTick;
-        uint160 sqrtPriceX96;
-    }
-
     event WhitelistUpdated(address indexed user, bool status);
     event ProtocolFeeUpdated(uint256 newFee);
     event FeeRecipientUpdated(address newRecipient);
@@ -141,7 +134,16 @@ contract UniswapLP is Ownable {
         address tokenA,
         address tokenB,
         uint24 fee
-    ) public view returns (PoolInfo memory) {
+    )
+        public
+        view
+        returns (
+            address token0,
+            address token1,
+            int24 tick,
+            uint160 sqrtPriceX96
+        )
+    {
         if (tokenA == tokenB) revert TokensMustBeDifferent();
 
         address poolAddress = factory.getPool(tokenA, tokenB, fee);
@@ -149,33 +151,20 @@ contract UniswapLP is Ownable {
 
         IUniswapV3Pool pool = IUniswapV3Pool(poolAddress);
 
-        (uint160 sqrtPriceX96, int24 tick, , , , , ) = pool.slot0();
+        (sqrtPriceX96, tick, , , , , ) = pool.slot0();
         if (sqrtPriceX96 == 0) revert InvalidPool();
 
-        address token0 = pool.token0();
-        address token1 = pool.token1();
-
-        return
-            PoolInfo({
-                token0: token0,
-                token1: token1,
-                currentTick: tick,
-                sqrtPriceX96: sqrtPriceX96
-            });
+        token0 = pool.token0();
+        token1 = pool.token1();
     }
 
     // 获取单边资产投入的理论比例 (简化版 - 仅用于参考)
     function getUniDirectionalRatio(
-        address tokenA,
-        address tokenB,
-        uint24 fee,
+        int24 currentTick,
+        uint160 sqrtPriceX96,
         int24 tickLower,
         int24 tickUpper
-    ) public view returns (uint256 ratioToken0, uint256 ratioToken1) {
-        PoolInfo memory poolInfo = getPoolInfo(tokenA, tokenB, fee);
-
-        int24 currentTick = poolInfo.currentTick;
-
+    ) public pure returns (uint256 ratioToken0, uint256 ratioToken1) {
         if (currentTick <= tickLower) {
             // 价格低于区间：全部 token0
             return (PERCENTAGE_BASE, 0);
@@ -186,7 +175,7 @@ contract UniswapLP is Ownable {
             return (0, PERCENTAGE_BASE);
         }
 
-        uint256 sc = uint256(poolInfo.sqrtPriceX96);
+        uint256 sc = uint256(sqrtPriceX96);
         uint256 sa = uint256(TickMath.getSqrtRatioAtTick(tickLower));
         uint256 sb = uint256(TickMath.getSqrtRatioAtTick(tickUpper));
 
@@ -222,20 +211,25 @@ contract UniswapLP is Ownable {
             uint256 amount1
         )
     {
-        require(amountIn > 0, "Invalid amount");
-        require(slippageTolerance <= PERCENTAGE_BASE, "Slippage too high");
-        require(deadline >= block.timestamp, "Deadline exceeded");
+        if (amountIn == 0) revert InvalidAmount();
+        if (slippageTolerance > PERCENTAGE_BASE) revert SlippageTooHigh();
+        if (deadline < block.timestamp) revert DeadlineExceeded();
         IWETH wethLocal = weth;
         INonfungiblePositionManager positionManagerLocal = positionManager;
 
         // 处理 ETH 转 WETH
         if (tokenIn == address(wethLocal) && msg.value > 0) {
-            require(msg.value == amountIn, "ETH amount mismatch");
+            if (msg.value != amountIn) revert EthAmountMismatch();
             wethLocal.deposit{value: msg.value}();
         }
 
         // 获取 pool 信息
-        PoolInfo memory poolInfo = getPoolInfo(tokenIn, tokenOut, poolFee);
+        (
+            address token0,
+            address token1,
+            int24 tick,
+            uint160 sqrtPriceX96
+        ) = getPoolInfo(tokenIn, tokenOut, poolFee);
 
         // 获取目标价格范围的投入比例
         uint256 amount0Desired;
@@ -244,9 +238,8 @@ contract UniswapLP is Ownable {
         uint256 amount1Min = 0;
         {
             (uint256 ratioToken0, uint256 ratioToken1) = getUniDirectionalRatio(
-                tokenIn,
-                tokenOut,
-                poolFee,
+                tick,
+                sqrtPriceX96,
                 tickLower,
                 tickUpper
             );
@@ -255,6 +248,14 @@ contract UniswapLP is Ownable {
             uint256 protocolFeeAmount = calculateFee(amountIn);
             uint256 amountInAfterFee = amountIn - protocolFeeAmount;
 
+            // 转入用户的代币（如果不是通过 ETH 已转入）
+            if (!(tokenIn == address(wethLocal) && msg.value > 0)) {
+                IERC20(tokenIn).safeTransferFrom(
+                    msg.sender,
+                    address(this),
+                    amountIn
+                );
+            }
             if (protocolFeeAmount > 0) {
                 if (tokenIn == address(wethLocal) && msg.value > 0) {
                     // 已从合约的 WETH 余额中支付手续费
@@ -264,25 +265,15 @@ contract UniswapLP is Ownable {
                     );
                 } else {
                     // 从用户账户转移代币作为手续费
-                    IERC20(tokenIn).safeTransferFrom(
-                        msg.sender,
+                    IERC20(tokenIn).safeTransfer(
                         feeRecipient,
                         protocolFeeAmount
                     );
                 }
             }
 
-            // 转入用户的代币（如果不是通过 ETH 已转入）
-            if (!(tokenIn == address(wethLocal) && msg.value > 0)) {
-                IERC20(tokenIn).safeTransferFrom(
-                    msg.sender,
-                    address(this),
-                    amountInAfterFee
-                );
-            }
-
             // 计算需要的 token0 和 token1 的投入量（按比例分配）
-            if (tokenIn == poolInfo.token0) {
+            if (tokenIn == token0) {
                 // 用户投入 token0，需要 swap 一部分换成 token1
                 uint256 token0Amount = (amountInAfterFee * ratioToken0) /
                     PERCENTAGE_BASE;
@@ -345,23 +336,37 @@ contract UniswapLP is Ownable {
 
         // 批准 position manager
         if (amount0Desired > 0) {
-            IERC20(poolInfo.token0).safeIncreaseAllowance(
-                address(positionManagerLocal),
-                amount0Desired
-            );
+            if (
+                IERC20(token0).allowance(
+                    address(this),
+                    address(positionManagerLocal)
+                ) == 0
+            ) {
+                IERC20(token0).approve(
+                    address(positionManagerLocal),
+                    type(uint256).max
+                );
+            }
         }
         if (amount1Desired > 0) {
-            IERC20(poolInfo.token1).safeIncreaseAllowance(
-                address(positionManagerLocal),
-                amount1Desired
-            );
+            if (
+                IERC20(token1).allowance(
+                    address(this),
+                    address(positionManagerLocal)
+                ) == 0
+            ) {
+                IERC20(token1).approve(
+                    address(positionManagerLocal),
+                    type(uint256).max
+                );
+            }
         }
 
         // Mint LP
         (tokenId, liquidity, amount0, amount1) = positionManagerLocal.mint(
             INonfungiblePositionManager.MintParams({
-                token0: poolInfo.token0,
-                token1: poolInfo.token1,
+                token0: token0,
+                token1: token1,
                 fee: poolFee,
                 tickLower: tickLower,
                 tickUpper: tickUpper,
@@ -374,16 +379,15 @@ contract UniswapLP is Ownable {
             })
         );
 
-        // 清理剩余代币
-        _cleanupTokens(poolInfo.token0, poolInfo.token1);
-
-        emit LiquidityAdded(
-            tokenId,
-            poolInfo.token0,
-            poolInfo.token1,
-            poolFee,
-            liquidity
+        // 计算并退还剩余代币（按交易链路记账），直接传入 amountDesired - amount
+        _cleanupTokens(
+            token0,
+            token1,
+            amount0Desired > amount0 ? amount0Desired - amount0 : 0,
+            amount1Desired > amount1 ? amount1Desired - amount1 : 0
         );
+
+        emit LiquidityAdded(tokenId, token0, token1, poolFee, liquidity);
     }
 
     // 内部函数：执行单个 swap 操作
@@ -396,10 +400,17 @@ contract UniswapLP is Ownable {
         uint256 deadline
     ) private returns (uint256 amountOut) {
         ISwapRouter swapRouterLocal = swapRouter;
-        IERC20(tokenIn).safeIncreaseAllowance(
-            address(swapRouterLocal),
-            amountIn
-        );
+        if (
+            IERC20(tokenIn).allowance(
+                address(this),
+                address(swapRouterLocal)
+            ) == 0
+        ) {
+            IERC20(tokenIn).approve(
+                address(swapRouterLocal),
+                type(uint256).max
+            );
+        }
 
         (uint256 quotedAmount, uint160 sqrtPriceX96, , ) = quoterV2
             .quoteExactInputSingle(
@@ -449,16 +460,19 @@ contract UniswapLP is Ownable {
         emit SwapExecuted(tokenIn, tokenOut, amountIn, amountOut);
     }
 
-    // 内部函数：清理合约内的剩余代币
-    function _cleanupTokens(address token0, address token1) internal {
-        uint256 balance0 = IERC20(token0).balanceOf(address(this));
-        uint256 balance1 = IERC20(token1).balanceOf(address(this));
-
-        if (balance0 > 0) {
-            IERC20(token0).safeTransfer(msg.sender, balance0);
+    // 内部函数：按交易链路记账后，将剩余代币退还给调用者
+    // 注意：不再读取合约全部余额，由调用方传入应退还的剩余金额
+    function _cleanupTokens(
+        address token0,
+        address token1,
+        uint256 return0,
+        uint256 return1
+    ) internal {
+        if (return0 > 0) {
+            IERC20(token0).safeTransfer(msg.sender, return0);
         }
-        if (balance1 > 0) {
-            IERC20(token1).safeTransfer(msg.sender, balance1);
+        if (return1 > 0) {
+            IERC20(token1).safeTransfer(msg.sender, return1);
         }
     }
 
@@ -522,10 +536,14 @@ contract UniswapLP is Ownable {
             }
 
             // 获取投入比例
-            (uint256 ratioToken0, uint256 ratioToken1) = getUniDirectionalRatio(
+            (, , int24 tick, uint160 sqrtPriceX96) = getPoolInfo(
                 token0,
                 token1,
-                fee,
+                fee
+            );
+            (uint256 ratioToken0, uint256 ratioToken1) = getUniDirectionalRatio(
+                tick,
+                sqrtPriceX96,
                 tickLower,
                 tickUpper
             );
@@ -534,6 +552,14 @@ contract UniswapLP is Ownable {
             uint256 protocolFeeAmount = calculateFee(amountIn);
             uint256 amountInAfterFee = amountIn - protocolFeeAmount;
 
+            // 转入用户的代币（如果不是通过 ETH 已转入）
+            if (!(tokenIn == address(wethLocal) && msg.value > 0)) {
+                IERC20(tokenIn).safeTransferFrom(
+                    msg.sender,
+                    address(this),
+                    amountIn
+                );
+            }
             if (protocolFeeAmount > 0) {
                 if (tokenIn == address(wethLocal) && msg.value > 0) {
                     IERC20(address(wethLocal)).safeTransfer(
@@ -541,21 +567,11 @@ contract UniswapLP is Ownable {
                         protocolFeeAmount
                     );
                 } else {
-                    IERC20(tokenIn).safeTransferFrom(
-                        msg.sender,
+                    IERC20(tokenIn).safeTransfer(
                         feeRecipient,
                         protocolFeeAmount
                     );
                 }
-            }
-
-            // 转入用户的代币（如果不是通过 ETH 已转入）
-            if (!(tokenIn == address(wethLocal) && msg.value > 0)) {
-                IERC20(tokenIn).safeTransferFrom(
-                    msg.sender,
-                    address(this),
-                    amountInAfterFee
-                );
             }
 
             // 确定投入的 token 方向（是 token0 还是 token1）
@@ -623,16 +639,30 @@ contract UniswapLP is Ownable {
 
         // 批准 position manager
         if (amount0Desired > 0) {
-            IERC20(token0).safeIncreaseAllowance(
-                address(positionManagerLocal),
-                amount0Desired
-            );
+            if (
+                IERC20(token0).allowance(
+                    address(this),
+                    address(positionManagerLocal)
+                ) == 0
+            ) {
+                IERC20(token0).approve(
+                    address(positionManagerLocal),
+                    type(uint256).max
+                );
+            }
         }
         if (amount1Desired > 0) {
-            IERC20(token1).safeIncreaseAllowance(
-                address(positionManagerLocal),
-                amount1Desired
-            );
+            if (
+                IERC20(token1).allowance(
+                    address(this),
+                    address(positionManagerLocal)
+                ) == 0
+            ) {
+                IERC20(token1).approve(
+                    address(positionManagerLocal),
+                    type(uint256).max
+                );
+            }
         }
 
         // 增加流动性
@@ -647,8 +677,13 @@ contract UniswapLP is Ownable {
             })
         );
 
-        // 清理剩余代币
-        _cleanupTokens(token0, token1);
+        // 计算并退还剩余代币（按交易链路记账），直接传入 amountDesired - amount
+        _cleanupTokens(
+            token0,
+            token1,
+            amount0Desired > amount0 ? amount0Desired - amount0 : 0,
+            amount1Desired > amount1 ? amount1Desired - amount1 : 0
+        );
 
         emit LiquidityIncreased(tokenId, liquidity, amount0, amount1);
     }
