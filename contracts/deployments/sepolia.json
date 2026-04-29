@@ -1,8 +1,11 @@
 {
     "chainId": 11155111,
     "chainName": "Sepolia Testnet",
-    "uniswapV3Router": "0xE592427A0AEce92De3Edee1F18E0157C05861564",
-    "uniswapV3Factory": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-    "uniswapV3PositionManager": "0xC36442b4a4522E871399CD717aBD90098588639f",
-    "weth": "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9"
+    "uniswapV3Router": "0xD84145D731cf69f311C5fAe93350Dd3f3e91eb90",
+    "uniswapV3Factory": "0x0227628f3F023bb0B980b67D528571c95c6DaC1c",
+    "uniswapV3PositionManager": "0x1238536071E1c677A632429e3655c799b22cDA52",
+    "weth": "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14",
+    "quoterV2": "0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3",
+    "feeRecipient": "0x5639Bc2D96c7bA37EECA625599B183241A2bBE6c",
+    "owner": "0x5639Bc2D96c7bA37EECA625599B183241A2bBE6c"
 }

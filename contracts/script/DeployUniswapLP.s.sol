@@ -7,7 +7,7 @@ import {UniswapLP} from "../src/UniswapLP.sol";
 import {stdJson} from "forge-std/StdJson.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 
-contract UniswapLPScript is Script {
+contract DeployUniswapLP is Script {
     using stdJson for string;
 
     string public constant MAINNET = "ethereum";
@@ -21,6 +21,8 @@ contract UniswapLPScript is Script {
         address uniswapV3PositionManager;
         address weth;
         address quoterV2;
+        address feeRecipient;
+        address owner;
     }
 
     function run() public {
@@ -39,21 +41,19 @@ contract UniswapLPScript is Script {
         // 读取部署配置
         NetworkConfig memory config = readNetworkConfig(network);
 
-        vm.startBroadcast();
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        vm.startBroadcast(deployerPrivateKey);
 
         // 部署合约
-        address feeRecipient = msg.sender;
         UniswapLP uniswapLP = new UniswapLP(
             config.uniswapV3Router,
             config.uniswapV3PositionManager,
             config.uniswapV3Factory,
             config.weth,
             config.quoterV2,
-            feeRecipient,
-            msg.sender
+            config.feeRecipient,
+            config.owner
         );
-
-        vm.stopBroadcast();
 
         // 记录部署地址
         recordDeployment(network, address(uniswapLP));
@@ -61,7 +61,8 @@ contract UniswapLPScript is Script {
         console.log("UniswapLP deployed at:", address(uniswapLP));
         console.log("Network:", config.chainName);
         console.log("Chain ID:", config.chainId);
-        console.log("Fee Recipient:", feeRecipient);
+        console.log("Fee Recipient:", config.feeRecipient);
+        vm.stopBroadcast();
     }
 
     function readNetworkConfig(
@@ -86,6 +87,8 @@ contract UniswapLPScript is Script {
         );
         config.weth = json.readAddress(".weth");
         config.quoterV2 = json.readAddress(".quoterV2");
+        config.feeRecipient = json.readAddress(".feeRecipient");
+        config.owner = json.readAddress(".owner");
 
         return config;
     }
@@ -112,8 +115,7 @@ contract UniswapLPScript is Script {
                 '",\n',
                 '  "deployer": "',
                 Strings.toHexString(msg.sender),
-                '"\n',
-                "}"
+                '"\n}'
             )
         );
 
